@@ -13,7 +13,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, pkcs7
 from androguard.core.apk import APK
+from androguard.core.axml import ARSCParser, AXMLPrinter
 from androguard.core.dex import DEX
+import lxml.etree
 
 def uleb128(v):
     b = bytearray()
@@ -310,7 +312,7 @@ def build_classes_dex(package_name="com.clickifyouwant.game"):
     return full_dex
 
 def build_manifest_axml(package_name="com.clickifyouwant.game", app_label="Click if you want"):
-    template_apk = "/tmp/min2/releases/2.00/quoinsight.apk"
+    template_apk = "/tmp/min2/bin/quoinsight-aligned.0.1.apk"
     z = zipfile.ZipFile(template_apk)
     axml = bytearray(z.read("AndroidManifest.xml"))
     
@@ -326,8 +328,8 @@ def build_manifest_axml(package_name="com.clickifyouwant.game", app_label="Click
         orig_strings.append(s)
 
     replacements = {
-        "2.00": "1.0.0",
-        "QuoInsight\u2638Minimal": app_label,
+        "0.1": "1.0.0",
+        "Minimal": app_label,
         "com.quoinsight.minimal": package_name,
         "com.quoinsight.minimal.MainActivity": f"{package_name}.MainActivity",
     }
@@ -357,18 +359,15 @@ def build_manifest_axml(package_name="com.clickifyouwant.game", app_label="Click
 
     return new_file_header + new_sp_chunk + rest_of_axml
 
-def generate_app_icon():
-    img = Image.new("RGBA", (192, 192), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([6, 6, 186, 186], radius=40, fill=(32, 36, 56, 255), outline=(143, 160, 221, 255), width=4)
-    draw.ellipse([36, 36, 156, 156], fill=(255, 170, 0, 255), outline=(255, 215, 0, 255), width=6)
-    draw.ellipse([46, 46, 146, 146], outline=(255, 235, 120, 180), width=2)
-    draw.ellipse([70, 65, 122, 127], outline=(255, 255, 255, 255), width=10)
+def build_resources_arsc(package_name="com.clickifyouwant.game"):
+    template_apk = "/tmp/min2/bin/quoinsight-aligned.0.1.apk"
+    z = zipfile.ZipFile(template_apk)
+    arsc = bytearray(z.read("resources.arsc"))
     
-    icon_path = "/tmp/icon.png"
-    img.save(icon_path, "PNG")
-    with open(icon_path, "rb") as f:
-        return f.read()
+    sp_type, sp_hdr_size, sp_size = struct.unpack_from("<HHI", arsc, 12)
+    pkg_pos = 12 + sp_size
+    arsc[pkg_pos+12:pkg_pos+12+256] = package_name.encode("utf-16le").ljust(256, b"\x00")
+    return bytes(arsc)
 
 def generate_html_game():
     return """<!DOCTYPE html>
@@ -721,9 +720,6 @@ def generate_html_game():
 """
 
 def sign_and_align_apk(file_entries, output_apk_path):
-    """
-    Creates a valid 4-byte zipaligned APK with both Scheme v1 and Scheme v2 signatures.
-    """
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, u"Click if you want"),
@@ -744,7 +740,6 @@ def sign_and_align_apk(file_entries, output_apk_path):
     ).sign(key, hashes.SHA256())
     cert_der = cert.public_bytes(Encoding.DER)
 
-    # 1. Build v1 signatures (MANIFEST.MF and CERT.SF, CERT.RSA)
     manifest_lines = [
         "Manifest-Version: 1.0",
         "Created-By: 1.0 (Android)",
@@ -780,7 +775,6 @@ def sign_and_align_apk(file_entries, output_apk_path):
     ]
     sf_bytes = ("\r\n".join(sf_header + sf_lines[3:]) + "\r\n").encode("utf-8")
     
-    # Sign CERT.SF with PKCS#7 for CERT.RSA
     builder = pkcs7.PKCS7SignatureBuilder().set_data(sf_bytes)
     builder = builder.add_signer(cert, key, hashes.SHA256())
     cert_rsa_bytes = builder.sign(serialization.Encoding.DER, [pkcs7.PKCS7Options.DetachedSignature])
@@ -790,8 +784,6 @@ def sign_and_align_apk(file_entries, output_apk_path):
     all_entries["META-INF/CERT.SF"] = sf_bytes
     all_entries["META-INF/CERT.RSA"] = cert_rsa_bytes
 
-    # 2. Build aligned ZIP binary
-    # Local file headers + data (aligned to 4 bytes for uncompressed data)
     zip_bytes = bytearray()
     cd_entries = []
     
@@ -800,18 +792,15 @@ def sign_and_align_apk(file_entries, output_apk_path):
         crc = zlib.crc32(data) & 0xffffffff
         uncomp_size = len(data)
         
-        # Decide compression: store uncompressed for resources.arsc and small files, deflate for assets
         if name.endswith(".arsc") or len(data) < 256:
-            compress_type = 0 # STORED
+            compress_type = 0
             comp_data = data
         else:
-            compress_type = 8 # DEFLATED
-            comp_data = zlib.compress(data, 9)[2:-4] # raw deflate without zlib header/checksum
+            compress_type = 8
+            comp_data = zlib.compress(data, 9)[2:-4]
             
         comp_size = len(comp_data)
         
-        # Calculate alignment padding
-        # Local header is 30 bytes + len(name)
         header_len = 30 + len(name_bytes)
         current_offset = len(zip_bytes)
         data_offset = current_offset + header_len
@@ -825,12 +814,12 @@ def sign_and_align_apk(file_entries, output_apk_path):
                 
         local_header = struct.pack(
             "<IHHHHHIIIHH",
-            0x04034b50, # local file header signature
-            20, # version needed to extract (2.0)
-            0,  # general purpose bit flag
+            0x04034b50,
+            20,
+            0,
             compress_type,
-            0,  # last mod file time
-            0,  # last mod file date
+            0,
+            0,
             crc,
             comp_size,
             uncomp_size,
@@ -841,25 +830,24 @@ def sign_and_align_apk(file_entries, output_apk_path):
         local_file_offset = len(zip_bytes)
         zip_bytes += local_header + name_bytes + extra_bytes + comp_data
         
-        # CD entry record
         cd_record = struct.pack(
             "<IHHHHHHIIIHHHHHII",
-            0x02014b50, # central file header signature
-            20, # version made by
-            20, # version needed to extract
-            0,  # general purpose bit flag
+            0x02014b50,
+            20,
+            20,
+            0,
             compress_type,
-            0,  # last mod file time
-            0,  # last mod file date
+            0,
+            0,
             crc,
             comp_size,
             uncomp_size,
             len(name_bytes),
-            0,  # extra field length
-            0,  # file comment length
-            0,  # disk number start
-            0,  # internal file attributes
-            0,  # external file attributes
+            0,
+            0,
+            0,
+            0,
+            0,
             local_file_offset
         )
         cd_entries.append((cd_record, name_bytes))
@@ -873,19 +861,18 @@ def sign_and_align_apk(file_entries, output_apk_path):
     eocd_offset = cd_offset + cd_size
     eocd_bytes = struct.pack(
         "<IHHHHIIH",
-        0x06054b50, # end of central dir signature
-        0, # number of this disk
-        0, # number of disk with start of CD
-        len(cd_entries), # total entries on this disk
-        len(cd_entries), # total entries
+        0x06054b50,
+        0,
+        0,
+        len(cd_entries),
+        len(cd_entries),
         cd_size,
         cd_offset,
-        0  # comment length
+        0
     )
     
     raw_apk = bytes(zip_bytes) + bytes(cd_bytes) + eocd_bytes
 
-    # 3. Compute APK Signature Scheme v2
     def compute_apk_v2_digest(apk_bytes, cd_off, eocd_off):
         section1 = apk_bytes[:cd_off]
         section2 = apk_bytes[cd_off:eocd_off]
@@ -937,7 +924,6 @@ def sign_and_align_apk(file_entries, output_apk_path):
     block_size = len(pair_data) + 8 + 16
     signing_block = struct.pack("<Q", block_size) + pair_data + struct.pack("<Q", block_size) + b"APK Sig Block 42"
 
-    # Assemble final APK with Signing Block before Central Directory
     sec1 = raw_apk[:cd_offset]
     sec2 = raw_apk[cd_offset:eocd_offset]
     eocd_final = bytearray(raw_apk[eocd_offset:])
@@ -956,24 +942,19 @@ def main():
     print("1. Generating Dalvik DEX bytecode...")
     dex_bytes = build_classes_dex(package_name)
     
-    print("2. Generating Android Binary XML manifest (with android:exported=true)...")
+    print("2. Generating Android Binary XML manifest...")
     axml_bytes = build_manifest_axml(package_name, app_label)
     
-    print("3. Generating HTML5 game engine asset...")
+    print("3. Generating Resources table (ARSC)...")
+    arsc_bytes = build_resources_arsc(package_name)
+    
+    print("4. Generating HTML5 game engine asset...")
     html_content = generate_html_game().encode("utf-8")
-    
-    print("4. Generating app icon...")
-    icon_png_data = generate_app_icon()
-    
-    template_apk = "/tmp/min2/releases/2.00/quoinsight.apk"
-    z_tpl = zipfile.ZipFile(template_apk)
-    resources_arsc = z_tpl.read("resources.arsc")
     
     file_entries = {
         "AndroidManifest.xml": axml_bytes,
         "classes.dex": dex_bytes,
-        "resources.arsc": resources_arsc,
-        "res/drawable-hdpi-v4/icon.png": icon_png_data,
+        "resources.arsc": arsc_bytes,
         "assets/index.html": html_content
     }
     
@@ -986,10 +967,15 @@ def main():
     print("\n🔍 Validating output APK...")
     a = APK(output_apk)
     print("Package:", a.get_package())
+    print("App Name:", a.get_app_name())
     print("Main Activity:", a.get_main_activity())
-    print("Target SDK:", a.get_target_sdk_version())
+    print("Activities in Manifest:", a.get_activities())
     print("Signed v1:", a.is_signed_v1())
     print("Signed v2:", a.is_signed_v2())
+    arsc = ARSCParser(a.get_file("resources.arsc"))
+    print("ARSC packages:", arsc.get_packages_names())
+    d = DEX(a.get_dex())
+    print("DEX classes:", [c.get_name() for c in d.get_classes()])
 
 if __name__ == "__main__":
     main()
