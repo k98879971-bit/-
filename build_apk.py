@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import subprocess
 import zipfile
 import struct
 import hashlib
@@ -13,9 +14,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, pkcs7
 from androguard.core.apk import APK
-from androguard.core.axml import ARSCParser, AXMLPrinter
+from androguard.core.axml import ARSCParser
 from androguard.core.dex import DEX
-import lxml.etree
 
 def uleb128(v):
     b = bytearray()
@@ -311,413 +311,60 @@ def build_classes_dex(package_name="com.clickifyouwant.game"):
     full_dex = header + body
     return full_dex
 
-def build_manifest_axml(package_name="com.clickifyouwant.game", app_label="Click if you want"):
-    template_apk = "/tmp/min2/bin/quoinsight-aligned.0.1.apk"
-    z = zipfile.ZipFile(template_apk)
-    axml = bytearray(z.read("AndroidManifest.xml"))
+def compile_with_aapt2(package_name="com.clickifyouwant.game", app_label="Click if you want"):
+    aapt2_bin = "./node_modules/aaptjs3/bin/x64/linux/aapt2"
+    android_jar = "/tmp/j2s/lib/android/android.jar"
     
-    sp_type, sp_hdr_size, sp_chunk_size, str_count, style_count, flags, strings_start, styles_start = struct.unpack_from("<HHIIIIII", axml, 8)
-    offsets = list(struct.unpack_from(f"<{str_count}I", axml, 8 + 28))
-
-    orig_strings = []
-    for off in offsets:
-        pos = 8 + strings_start + off
-        u16len = struct.unpack_from("<H", axml, pos)[0]
-        pos += 2
-        s = axml[pos:pos+u16len*2].decode("utf-16le")
-        orig_strings.append(s)
-
-    replacements = {
-        "0.1": "1.0.0",
-        "Minimal": app_label,
-        "com.quoinsight.minimal": package_name,
-        "com.quoinsight.minimal.MainActivity": f"{package_name}.MainActivity",
-    }
-
-    new_strings = [replacements.get(s, s) for s in orig_strings]
-
-    new_string_bytes = bytearray()
-    new_offsets = []
-    for s in new_strings:
-        new_offsets.append(len(new_string_bytes))
-        s_encoded = s.encode("utf-16le")
-        new_string_bytes += struct.pack("<H", len(s)) + s_encoded + b"\x00\x00"
-
-    while len(new_string_bytes) % 4 != 0:
-        new_string_bytes += b"\x00"
-
-    new_strings_start = 28 + len(new_offsets) * 4
-    new_sp_chunk_size = new_strings_start + len(new_string_bytes)
-
-    new_sp_header = struct.pack("<HHIIIIII", sp_type, sp_hdr_size, new_sp_chunk_size, len(new_strings), style_count, flags, new_strings_start, 0)
-    new_sp_offsets = struct.pack(f"<{len(new_offsets)}I", *new_offsets)
-    new_sp_chunk = new_sp_header + new_sp_offsets + bytes(new_string_bytes)
-
-    rest_of_axml = axml[8 + sp_chunk_size:]
-    new_file_size = 8 + len(new_sp_chunk) + len(rest_of_axml)
-    new_file_header = struct.pack("<HHI", 3, 8, new_file_size)
-
-    return new_file_header + new_sp_chunk + rest_of_axml
-
-def build_resources_arsc(package_name="com.clickifyouwant.game"):
-    template_apk = "/tmp/min2/bin/quoinsight-aligned.0.1.apk"
-    z = zipfile.ZipFile(template_apk)
-    arsc = bytearray(z.read("resources.arsc"))
+    work_dir = "/tmp/aapt2_build"
+    os.makedirs(f"{work_dir}/res/drawable", exist_ok=True)
     
-    sp_type, sp_hdr_size, sp_size = struct.unpack_from("<HHI", arsc, 12)
-    pkg_pos = 12 + sp_size
-    arsc[pkg_pos+12:pkg_pos+12+256] = package_name.encode("utf-16le").ljust(256, b"\x00")
-    return bytes(arsc)
+    # Copy icon
+    if os.path.exists("icon-192.png"):
+        import shutil
+        shutil.copy("icon-192.png", f"{work_dir}/res/drawable/icon.png")
+        
+    manifest_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="{package_name}"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+
+    <uses-sdk
+        android:minSdkVersion="21"
+        android:targetSdkVersion="34" />
+
+    <application
+        android:label="{app_label}"
+        android:icon="@drawable/icon"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"""
+    with open(f"{work_dir}/AndroidManifest.xml", "w") as f:
+        f.write(manifest_xml)
+        
+    subprocess.run([aapt2_bin, "compile", "--dir", f"{work_dir}/res", "-o", f"{work_dir}/compiled.zip"], check=True)
+    subprocess.run([aapt2_bin, "link", "-I", android_jar, "--manifest", f"{work_dir}/AndroidManifest.xml", "-o", f"{work_dir}/linked.apk", f"{work_dir}/compiled.zip", "--auto-add-overlay"], check=True)
+    
+    z = zipfile.ZipFile(f"{work_dir}/linked.apk")
+    axml_bytes = z.read("AndroidManifest.xml")
+    arsc_bytes = z.read("resources.arsc")
+    icon_bytes = z.read("res/drawable/icon.png")
+    return axml_bytes, arsc_bytes, icon_bytes
 
 def generate_html_game():
-    return """<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Click if you want</title>
-  <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      user-select: none;
-      -webkit-user-select: none;
-      -webkit-touch-callout: none;
-      -webkit-tap-highlight-color: transparent;
-    }
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      background: radial-gradient(circle at 50% 30%, #202438 0%, #11131c 100%);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      color: #ffffff;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: space-between;
-      touch-action: manipulation;
-    }
-    .header {
-      margin-top: 40px;
-      text-align: center;
-      width: 90%;
-      max-width: 400px;
-    }
-    .game-title {
-      font-size: 24px;
-      font-weight: 700;
-      letter-spacing: 1px;
-      color: #8fa0dd;
-      text-transform: uppercase;
-      margin-bottom: 8px;
-    }
-    .score-container {
-      background: rgba(255, 255, 255, 0.07);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 20px;
-      padding: 16px 24px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.4);
-    }
-    .score-text {
-      font-size: 42px;
-      font-weight: 800;
-      color: #ffd700;
-      text-shadow: 0 2px 10px rgba(255, 215, 0, 0.4);
-      letter-spacing: 1px;
-    }
-    .stats-row {
-      display: flex;
-      justify-content: space-around;
-      margin-top: 10px;
-      font-size: 14px;
-      color: #a0aec0;
-    }
-    .stat-item span {
-      color: #fff;
-      font-weight: bold;
-    }
-    .center-stage {
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex: 1;
-      width: 100%;
-    }
-    .click-button {
-      width: 220px;
-      height: 220px;
-      border-radius: 50%;
-      background: radial-gradient(circle at 35% 35%, #ffe600, #ff9900 60%, #c46200 100%);
-      box-shadow: 0 15px 35px rgba(255, 153, 0, 0.4), inset 0 6px 10px rgba(255, 255, 255, 0.6), inset 0 -8px 12px rgba(0, 0, 0, 0.4);
-      border: 6px solid #ffcc00;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      outline: none;
-      transition: transform 0.08s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-      position: relative;
-      z-index: 10;
-    }
-    .click-button:active {
-      transform: scale(0.92);
-      box-shadow: 0 8px 20px rgba(255, 153, 0, 0.3), inset 0 3px 6px rgba(255, 255, 255, 0.4);
-    }
-    .coin-inner {
-      width: 180px;
-      height: 180px;
-      border-radius: 50%;
-      border: 3px dashed rgba(255, 255, 255, 0.4);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .coin-letter {
-      font-size: 96px;
-      font-weight: 900;
-      color: #ffffff;
-      text-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
-    }
-    .floating-text {
-      position: absolute;
-      font-size: 32px;
-      font-weight: 800;
-      color: #ffd700;
-      pointer-events: none;
-      text-shadow: 0 2px 8px rgba(0,0,0,0.7);
-      animation: floatUp 0.8s ease-out forwards;
-      z-index: 20;
-    }
-    @keyframes floatUp {
-      0% {
-        opacity: 1;
-        transform: translate(-50%, -50%) scale(0.8);
-      }
-      50% {
-        transform: translate(calc(-50% + var(--rand-x)), -120px) scale(1.2);
-      }
-      100% {
-        opacity: 0;
-        transform: translate(calc(-50% + var(--rand-x)), -180px) scale(0.9);
-      }
-    }
-    .particle {
-      position: absolute;
-      width: 8px;
-      height: 8px;
-      background: #ffd700;
-      border-radius: 50%;
-      pointer-events: none;
-      animation: particlePop 0.6s cubic-bezier(0.25, 1, 0.5, 1) forwards;
-      z-index: 15;
-    }
-    @keyframes particlePop {
-      0% {
-        opacity: 1;
-        transform: translate(-50%, -50%) scale(1);
-      }
-      100% {
-        opacity: 0;
-        transform: translate(calc(-50% + var(--tx)), calc(-50% + var(--ty))) scale(0.2);
-      }
-    }
-    .footer {
-      margin-bottom: 30px;
-      width: 90%;
-      max-width: 360px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-    }
-    .reset-btn {
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      color: #a0aec0;
-      padding: 10px 20px;
-      border-radius: 12px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .reset-btn:active {
-      background: rgba(255, 59, 48, 0.3);
-      color: #ff3b30;
-      border-color: #ff3b30;
-    }
-    .info-text {
-      font-size: 12px;
-      color: #64748b;
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="game-title">Click if you want</div>
-    <div class="score-container">
-      <div class="score-text" id="scoreLabel">Счёт: 0</div>
-      <div class="stats-row">
-        <div class="stat-item">Рекорд: <span id="highScore">0</span></div>
-        <div class="stat-item">Кликов: <span id="totalClicks">0</span></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="center-stage" id="stage">
-    <button class="click-button" id="clickButton" aria-label="Click">
-      <div class="coin-inner">
-        <div class="coin-letter">O</div>
-      </div>
-    </button>
-  </div>
-
-  <div class="footer">
-    <button class="reset-btn" id="resetBtn">Сбросить прогресс</button>
-    <div class="info-text">Mobile Edition • 100% Offline</div>
-  </div>
-
-  <script>
-    let score = 0;
-    let highScore = 0;
-    let totalClicks = 0;
-
-    try {
-      score = parseInt(localStorage.getItem('clicker_score') || '0', 10);
-      highScore = parseInt(localStorage.getItem('clicker_high_score') || '0', 10);
-      totalClicks = parseInt(localStorage.getItem('clicker_total_clicks') || '0', 10);
-    } catch(e) {}
-
-    const scoreLabel = document.getElementById('scoreLabel');
-    const highScoreLabel = document.getElementById('highScore');
-    const totalClicksLabel = document.getElementById('totalClicks');
-    const clickButton = document.getElementById('clickButton');
-    const stage = document.getElementById('stage');
-    const resetBtn = document.getElementById('resetBtn');
-
-    let audioCtx = null;
-    function playClickSound() {
-      try {
-        if (!audioCtx) {
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (audioCtx.state === 'suspended') {
-          audioCtx.resume();
-        }
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'sine';
-        const now = audioCtx.currentTime;
-        osc.frequency.setValueAtTime(587.33, now);
-        osc.frequency.exponentialRampToValueAtTime(880, now + 0.08);
-        gain.gain.setValueAtTime(0.25, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start(now);
-        osc.stop(now + 0.08);
-      } catch(e) {}
-    }
-
-    function updateDisplay() {
-      scoreLabel.textContent = "Счёт: " + score;
-      highScoreLabel.textContent = highScore;
-      totalClicksLabel.textContent = totalClicks;
-    }
-
-    function saveState() {
-      try {
-        localStorage.setItem('clicker_score', score);
-        localStorage.setItem('clicker_high_score', highScore);
-        localStorage.setItem('clicker_total_clicks', totalClicks);
-      } catch(e) {}
-    }
-
-    function spawnFloatingText(x, y) {
-      const text = document.createElement('div');
-      text.className = 'floating-text';
-      text.textContent = '+1';
-      text.style.left = x + 'px';
-      text.style.top = y + 'px';
-      const randX = (Math.random() - 0.5) * 80 + 'px';
-      text.style.setProperty('--rand-x', randX);
-      stage.appendChild(text);
-      setTimeout(() => text.remove(), 800);
-    }
-
-    function spawnParticles(x, y) {
-      const colors = ['#ffd700', '#ffea00', '#ffffff', '#ff9900'];
-      for (let i = 0; i < 8; i++) {
-        const p = document.createElement('div');
-        p.className = 'particle';
-        p.style.left = x + 'px';
-        p.style.top = y + 'px';
-        p.style.background = colors[Math.floor(Math.random() * colors.length)];
-        const angle = (Math.PI * 2 / 8) * i + (Math.random() * 0.4 - 0.2);
-        const dist = 60 + Math.random() * 50;
-        const tx = Math.cos(angle) * dist + 'px';
-        const ty = Math.sin(angle) * dist + 'px';
-        p.style.setProperty('--tx', tx);
-        p.style.setProperty('--ty', ty);
-        stage.appendChild(p);
-        setTimeout(() => p.remove(), 600);
-      }
-    }
-
-    function handleClick(e) {
-      score += 1;
-      totalClicks += 1;
-      if (score > highScore) {
-        highScore = score;
-      }
-      updateDisplay();
-      saveState();
-
-      if (navigator.vibrate) {
-        navigator.vibrate(20);
-      }
-      playClickSound();
-
-      const rect = stage.getBoundingClientRect();
-      let clientX = e.clientX;
-      let clientY = e.clientY;
-      if (e.touches && e.touches.length > 0) {
-        clientX = e.touches[0].clientX;
-        clientY = e.touches[0].clientY;
-      } else if (!clientX) {
-        const btnRect = clickButton.getBoundingClientRect();
-        clientX = btnRect.left + btnRect.width / 2;
-        clientY = btnRect.top + btnRect.height / 2;
-      }
-      const x = clientX - rect.left;
-      const y = clientY - rect.top;
-      spawnFloatingText(x, y);
-      spawnParticles(x, y);
-    }
-
-    clickButton.addEventListener('pointerdown', (e) => {
-      handleClick(e);
-    });
-
-    resetBtn.addEventListener('click', () => {
-      if (confirm('Сбросить весь счёт?')) {
-        score = 0;
-        totalClicks = 0;
-        updateDisplay();
-        saveState();
-      }
-    });
-
-    updateDisplay();
-  </script>
-</body>
-</html>
-"""
+    with open("index.html", "r", encoding="utf-8") as f:
+        return f.read()
 
 def sign_and_align_apk(file_entries, output_apk_path):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -939,35 +586,35 @@ def main():
     package_name = "com.clickifyouwant.game"
     app_label = "Click if you want"
     
-    print("1. Generating Dalvik DEX bytecode...")
+    print("1. Compiling Android Resources and Manifest with official AAPT2...")
+    axml_bytes, arsc_bytes, icon_bytes = compile_with_aapt2(package_name, app_label)
+    
+    print("2. Generating Dalvik DEX bytecode...")
     dex_bytes = build_classes_dex(package_name)
     
-    print("2. Generating Android Binary XML manifest...")
-    axml_bytes = build_manifest_axml(package_name, app_label)
-    
-    print("3. Generating Resources table (ARSC)...")
-    arsc_bytes = build_resources_arsc(package_name)
-    
-    print("4. Generating HTML5 game engine asset...")
+    print("3. Generating HTML5 game engine asset...")
     html_content = generate_html_game().encode("utf-8")
     
     file_entries = {
         "AndroidManifest.xml": axml_bytes,
         "classes.dex": dex_bytes,
         "resources.arsc": arsc_bytes,
+        "res/drawable/icon.png": icon_bytes,
         "assets/index.html": html_content
     }
     
     output_apk = "Click_if_you_want.apk"
-    print(f"5. Packaging, 4-byte zipaligning, and dual-signing (v1 + v2) into {output_apk}...")
+    print(f"4. Packaging, 4-byte zipaligning, and dual-signing (v1 + v2) into {output_apk}...")
     sign_and_align_apk(file_entries, output_apk)
     
-    print(f"✅ Successfully built {output_apk} (Size: {os.path.getsize(output_apk)} bytes)!")
+    print(f"✅ Successfully built official AAPT2 APK: {output_apk} (Size: {os.path.getsize(output_apk)} bytes)!")
     
     print("\n🔍 Validating output APK...")
     a = APK(output_apk)
     print("Package:", a.get_package())
     print("App Name:", a.get_app_name())
+    print("Min SDK:", a.get_min_sdk_version())
+    print("Target SDK:", a.get_target_sdk_version())
     print("Main Activity:", a.get_main_activity())
     print("Activities in Manifest:", a.get_activities())
     print("Signed v1:", a.is_signed_v1())
