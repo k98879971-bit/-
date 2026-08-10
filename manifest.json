@@ -1,0 +1,24 @@
+{
+  "name": "Click if you want",
+  "short_name": "Clicker",
+  "description": "Мобильная игра-кликер Click if you want",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#11131c",
+  "theme_color": "#202438",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
