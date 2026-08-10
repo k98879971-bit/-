@@ -10,8 +10,10 @@ from PIL import Image, ImageDraw
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.serialization import pkcs7
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, pkcs7
+from androguard.core.apk import APK
+from androguard.core.dex import DEX
 
 def uleb128(v):
     b = bytearray()
@@ -308,7 +310,7 @@ def build_classes_dex(package_name="com.clickifyouwant.game"):
     return full_dex
 
 def build_manifest_axml(package_name="com.clickifyouwant.game", app_label="Click if you want"):
-    template_apk = "/tmp/min2/bin/quoinsight-aligned.0.2.apk"
+    template_apk = "/tmp/min2/releases/2.00/quoinsight.apk"
     z = zipfile.ZipFile(template_apk)
     axml = bytearray(z.read("AndroidManifest.xml"))
     
@@ -324,10 +326,10 @@ def build_manifest_axml(package_name="com.clickifyouwant.game", app_label="Click
         orig_strings.append(s)
 
     replacements = {
-        "0.2": "1.0.0",
+        "2.00": "1.0.0",
         "QuoInsight\u2638Minimal": app_label,
         "com.quoinsight.minimal": package_name,
-        "com.quoinsight.minimal.MainActivity": f"{package_name}.MainActivity"
+        "com.quoinsight.minimal.MainActivity": f"{package_name}.MainActivity",
     }
 
     new_strings = [replacements.get(s, s) for s in orig_strings]
@@ -718,7 +720,10 @@ def generate_html_game():
 </html>
 """
 
-def sign_apk(unsigned_apk_path, signed_apk_path):
+def sign_and_align_apk(file_entries, output_apk_path):
+    """
+    Creates a valid 4-byte zipaligned APK with both Scheme v1 and Scheme v2 signatures.
+    """
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, u"Click if you want"),
@@ -737,34 +742,29 @@ def sign_apk(unsigned_apk_path, signed_apk_path):
     ).not_valid_after(
         datetime.datetime.utcnow() + datetime.timedelta(days=3650)
     ).sign(key, hashes.SHA256())
+    cert_der = cert.public_bytes(Encoding.DER)
 
-    zin = zipfile.ZipFile(unsigned_apk_path, "r")
+    # 1. Build v1 signatures (MANIFEST.MF and CERT.SF, CERT.RSA)
     manifest_lines = [
         "Manifest-Version: 1.0",
         "Created-By: 1.0 (Android)",
         ""
     ]
-    
-    file_hashes = {}
     sf_lines = [
         "Signature-Version: 1.0",
         "Created-By: 1.0 (Android)",
+        "X-Android-APK-Signed: 2",
     ]
     
-    for name in zin.namelist():
-        if name.startswith("META-INF/"):
-            continue
-        data = zin.read(name)
-        sha1_data = base64.b64encode(hashlib.sha1(data).digest()).decode("ascii")
-        file_hashes[name] = sha1_data
-        
-        entry = f"Name: {name}\r\nSHA1-Digest: {sha1_data}\r\n\r\n"
-        manifest_lines.append(f"Name: {name}")
+    for filename, content in file_entries.items():
+        sha1_data = base64.b64encode(hashlib.sha1(content).digest()).decode("ascii")
+        entry = f"Name: {filename}\r\nSHA1-Digest: {sha1_data}\r\n\r\n"
+        manifest_lines.append(f"Name: {filename}")
         manifest_lines.append(f"SHA1-Digest: {sha1_data}")
         manifest_lines.append("")
         
         sha1_entry = base64.b64encode(hashlib.sha1(entry.encode("utf-8")).digest()).decode("ascii")
-        sf_lines.append(f"Name: {name}")
+        sf_lines.append(f"Name: {filename}")
         sf_lines.append(f"SHA1-Digest: {sha1_entry}")
         sf_lines.append("")
 
@@ -774,26 +774,180 @@ def sign_apk(unsigned_apk_path, signed_apk_path):
     sf_header = [
         "Signature-Version: 1.0",
         "Created-By: 1.0 (Android)",
+        "X-Android-APK-Signed: 2",
         f"SHA1-Digest-Manifest: {manifest_sha1}",
         ""
     ]
-    sf_bytes = ("\r\n".join(sf_header + sf_lines[2:]) + "\r\n").encode("utf-8")
+    sf_bytes = ("\r\n".join(sf_header + sf_lines[3:]) + "\r\n").encode("utf-8")
     
+    # Sign CERT.SF with PKCS#7 for CERT.RSA
     builder = pkcs7.PKCS7SignatureBuilder().set_data(sf_bytes)
     builder = builder.add_signer(cert, key, hashes.SHA256())
     cert_rsa_bytes = builder.sign(serialization.Encoding.DER, [pkcs7.PKCS7Options.DetachedSignature])
+
+    all_entries = dict(file_entries)
+    all_entries["META-INF/MANIFEST.MF"] = manifest_bytes
+    all_entries["META-INF/CERT.SF"] = sf_bytes
+    all_entries["META-INF/CERT.RSA"] = cert_rsa_bytes
+
+    # 2. Build aligned ZIP binary
+    # Local file headers + data (aligned to 4 bytes for uncompressed data)
+    zip_bytes = bytearray()
+    cd_entries = []
     
-    zout = zipfile.ZipFile(signed_apk_path, "w", zipfile.ZIP_DEFLATED)
-    zout.writestr("META-INF/MANIFEST.MF", manifest_bytes)
-    zout.writestr("META-INF/CERT.SF", sf_bytes)
-    zout.writestr("META-INF/CERT.RSA", cert_rsa_bytes)
-    
-    for name in zin.namelist():
-        if not name.startswith("META-INF/"):
-            zout.writestr(name, zin.read(name))
+    for name, data in all_entries.items():
+        name_bytes = name.encode("utf-8")
+        crc = zlib.crc32(data) & 0xffffffff
+        uncomp_size = len(data)
+        
+        # Decide compression: store uncompressed for resources.arsc and small files, deflate for assets
+        if name.endswith(".arsc") or len(data) < 256:
+            compress_type = 0 # STORED
+            comp_data = data
+        else:
+            compress_type = 8 # DEFLATED
+            comp_data = zlib.compress(data, 9)[2:-4] # raw deflate without zlib header/checksum
             
-    zin.close()
-    zout.close()
+        comp_size = len(comp_data)
+        
+        # Calculate alignment padding
+        # Local header is 30 bytes + len(name)
+        header_len = 30 + len(name_bytes)
+        current_offset = len(zip_bytes)
+        data_offset = current_offset + header_len
+        
+        extra_bytes = b""
+        if compress_type == 0:
+            pad = (4 - (data_offset % 4)) % 4
+            if pad > 0:
+                extra_bytes = b"\x00" * pad
+                header_len += pad
+                
+        local_header = struct.pack(
+            "<IHHHHHIIIHH",
+            0x04034b50, # local file header signature
+            20, # version needed to extract (2.0)
+            0,  # general purpose bit flag
+            compress_type,
+            0,  # last mod file time
+            0,  # last mod file date
+            crc,
+            comp_size,
+            uncomp_size,
+            len(name_bytes),
+            len(extra_bytes)
+        )
+        
+        local_file_offset = len(zip_bytes)
+        zip_bytes += local_header + name_bytes + extra_bytes + comp_data
+        
+        # CD entry record
+        cd_record = struct.pack(
+            "<IHHHHHHIIIHHHHHII",
+            0x02014b50, # central file header signature
+            20, # version made by
+            20, # version needed to extract
+            0,  # general purpose bit flag
+            compress_type,
+            0,  # last mod file time
+            0,  # last mod file date
+            crc,
+            comp_size,
+            uncomp_size,
+            len(name_bytes),
+            0,  # extra field length
+            0,  # file comment length
+            0,  # disk number start
+            0,  # internal file attributes
+            0,  # external file attributes
+            local_file_offset
+        )
+        cd_entries.append((cd_record, name_bytes))
+
+    cd_offset = len(zip_bytes)
+    cd_bytes = bytearray()
+    for cd_record, name_bytes in cd_entries:
+        cd_bytes += cd_record + name_bytes
+    cd_size = len(cd_bytes)
+
+    eocd_offset = cd_offset + cd_size
+    eocd_bytes = struct.pack(
+        "<IHHHHIIH",
+        0x06054b50, # end of central dir signature
+        0, # number of this disk
+        0, # number of disk with start of CD
+        len(cd_entries), # total entries on this disk
+        len(cd_entries), # total entries
+        cd_size,
+        cd_offset,
+        0  # comment length
+    )
+    
+    raw_apk = bytes(zip_bytes) + bytes(cd_bytes) + eocd_bytes
+
+    # 3. Compute APK Signature Scheme v2
+    def compute_apk_v2_digest(apk_bytes, cd_off, eocd_off):
+        section1 = apk_bytes[:cd_off]
+        section2 = apk_bytes[cd_off:eocd_off]
+        eocd = bytearray(apk_bytes[eocd_off:])
+        struct.pack_into("<I", eocd, 16, len(section1))
+        section3 = bytes(eocd)
+        
+        chunk_size = 1048576
+        chunk_hashes = []
+        
+        for sec in [section1, section2, section3]:
+            for i in range(0, len(sec), chunk_size):
+                chunk = sec[i:i+chunk_size]
+                h = hashlib.sha256(b"\xa5" + struct.pack("<I", len(chunk)) + chunk).digest()
+                chunk_hashes.append(h)
+                
+        total_chunks = len(chunk_hashes)
+        return hashlib.sha256(b"\x5a" + struct.pack("<I", total_chunks) + b"".join(chunk_hashes)).digest()
+
+    digest = compute_apk_v2_digest(raw_apk, cd_offset, eocd_offset)
+
+    digest_item = struct.pack("<I", 0x0103) + struct.pack("<I", len(digest)) + digest
+    digests_seq = struct.pack("<I", len(digest_item)) + digest_item
+    digests_block = struct.pack("<I", len(digests_seq)) + digests_seq
+
+    cert_item = struct.pack("<I", len(cert_der)) + cert_der
+    certs_seq = struct.pack("<I", len(cert_item)) + cert_item
+    certs_block = struct.pack("<I", len(certs_seq)) + certs_seq
+
+    attrs_block = struct.pack("<I", 0)
+
+    signed_data = struct.pack("<I", len(digests_block)) + digests_block + struct.pack("<I", len(certs_block)) + certs_block + struct.pack("<I", len(attrs_block)) + attrs_block
+
+    sig_bytes = key.sign(signed_data, padding.PKCS1v15(), hashes.SHA256())
+    sig_item = struct.pack("<I", 0x0103) + struct.pack("<I", len(sig_bytes)) + sig_bytes
+    signatures_seq = struct.pack("<I", len(sig_item)) + sig_item
+    signatures_block = struct.pack("<I", len(signatures_seq)) + signatures_seq
+
+    pubkey_der = key.public_key().public_bytes(encoding=Encoding.DER, format=PublicFormat.SubjectPublicKeyInfo)
+    pubkey_block = struct.pack("<I", len(pubkey_der)) + pubkey_der
+
+    signer_block = struct.pack("<I", len(signed_data)) + signed_data + struct.pack("<I", len(signatures_block)) + signatures_block + struct.pack("<I", len(pubkey_block)) + pubkey_block
+    signers_seq = struct.pack("<I", len(signer_block)) + signer_block
+    v2_block = struct.pack("<I", len(signers_seq)) + signers_seq
+
+    pair_len = 4 + len(v2_block)
+    pair_data = struct.pack("<Q", pair_len) + struct.pack("<I", 0x7109871a) + v2_block
+
+    block_size = len(pair_data) + 8 + 16
+    signing_block = struct.pack("<Q", block_size) + pair_data + struct.pack("<Q", block_size) + b"APK Sig Block 42"
+
+    # Assemble final APK with Signing Block before Central Directory
+    sec1 = raw_apk[:cd_offset]
+    sec2 = raw_apk[cd_offset:eocd_offset]
+    eocd_final = bytearray(raw_apk[eocd_offset:])
+    new_cd_offset = len(sec1) + len(signing_block)
+    struct.pack_into("<I", eocd_final, 16, new_cd_offset)
+
+    final_apk = sec1 + signing_block + sec2 + bytes(eocd_final)
+    
+    with open(output_apk_path, "wb") as f:
+        f.write(final_apk)
 
 def main():
     package_name = "com.clickifyouwant.game"
@@ -802,33 +956,40 @@ def main():
     print("1. Generating Dalvik DEX bytecode...")
     dex_bytes = build_classes_dex(package_name)
     
-    print("2. Generating Android Binary XML manifest...")
+    print("2. Generating Android Binary XML manifest (with android:exported=true)...")
     axml_bytes = build_manifest_axml(package_name, app_label)
     
     print("3. Generating HTML5 game engine asset...")
-    html_content = generate_html_game()
+    html_content = generate_html_game().encode("utf-8")
     
     print("4. Generating app icon...")
     icon_png_data = generate_app_icon()
     
-    template_apk = "/tmp/min2/bin/quoinsight-aligned.0.2.apk"
+    template_apk = "/tmp/min2/releases/2.00/quoinsight.apk"
     z_tpl = zipfile.ZipFile(template_apk)
     resources_arsc = z_tpl.read("resources.arsc")
     
-    tmp_unsigned = "/tmp/app_unsigned.apk"
-    z = zipfile.ZipFile(tmp_unsigned, "w", zipfile.ZIP_DEFLATED)
-    z.writestr("AndroidManifest.xml", axml_bytes)
-    z.writestr("classes.dex", dex_bytes)
-    z.writestr("resources.arsc", resources_arsc)
-    z.writestr("res/drawable-hdpi-v4/icon.png", icon_png_data)
-    z.writestr("assets/index.html", html_content)
-    z.close()
+    file_entries = {
+        "AndroidManifest.xml": axml_bytes,
+        "classes.dex": dex_bytes,
+        "resources.arsc": resources_arsc,
+        "res/drawable-hdpi-v4/icon.png": icon_png_data,
+        "assets/index.html": html_content
+    }
     
     output_apk = "Click_if_you_want.apk"
-    print(f"5. Signing APK into {output_apk}...")
-    sign_apk(tmp_unsigned, output_apk)
+    print(f"5. Packaging, 4-byte zipaligning, and dual-signing (v1 + v2) into {output_apk}...")
+    sign_and_align_apk(file_entries, output_apk)
     
     print(f"✅ Successfully built {output_apk} (Size: {os.path.getsize(output_apk)} bytes)!")
+    
+    print("\n🔍 Validating output APK...")
+    a = APK(output_apk)
+    print("Package:", a.get_package())
+    print("Main Activity:", a.get_main_activity())
+    print("Target SDK:", a.get_target_sdk_version())
+    print("Signed v1:", a.is_signed_v1())
+    print("Signed v2:", a.is_signed_v2())
 
 if __name__ == "__main__":
     main()
