@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://bvpnol3rwn1o7" path="res://control.gd" id="1_0fbet"]
 
-[node name="Control" type="Control" unique_id=395991191]
+[node name="Control" type="Control"]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -11,22 +11,32 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_0fbet")
 
-[node name="Button" type="Button" parent="." unique_id=27179282]
-layout_mode = 0
-offset_left = 395.0
-offset_top = 303.0
-offset_right = 709.0
-offset_bottom = 584.0
-theme_override_font_sizes/font_size = 200
-text = "O"
+[node name="Label" type="Label" parent="."]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_top = 160.0
+offset_bottom = 300.0
+grow_horizontal = 2
+theme_override_font_sizes/font_size = 72
+text = "Счёт: 0"
+horizontal_alignment = 1
+vertical_alignment = 1
 
-[node name="Label" type="Label" parent="." unique_id=1131993713]
-layout_mode = 0
-offset_left = 290.0
-offset_top = 44.0
-offset_right = 725.0
-offset_bottom = 249.0
-theme_override_font_sizes/font_size = 150
-text = "Coins"
+[node name="Button" type="Button" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -150.0
+offset_top = -150.0
+offset_right = 150.0
+offset_bottom = 150.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/font_size = 140
+text = "O"
 
 [connection signal="pressed" from="Button" to="." method="_on_button_pressed"]
