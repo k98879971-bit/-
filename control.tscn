@@ -31,10 +31,10 @@ text = "Coins"
 
 [node name="ShopButton" type="Button" parent="." unique_id=27179283]
 layout_mode = 0
-offset_left = 395.0
-offset_top = 610.0
-offset_right = 709.0
-offset_bottom = 700.0
+offset_left = 455.0
+offset_top = 540.0
+offset_right = 769.0
+offset_bottom = 630.0
 theme_override_font_sizes/font_size = 40
 text = "x2 клик — 50"
 
