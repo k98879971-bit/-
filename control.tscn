@@ -29,4 +29,23 @@ offset_bottom = 249.0
 theme_override_font_sizes/font_size = 150
 text = "Coins"
 
+[node name="ShopButton" type="Button" parent="." unique_id=27179283]
+layout_mode = 0
+offset_left = 395.0
+offset_top = 610.0
+offset_right = 709.0
+offset_bottom = 700.0
+theme_override_font_sizes/font_size = 40
+text = "x2 клик — 50"
+
+[node name="MultiplierLabel" type="Label" parent="." unique_id=1131993714]
+layout_mode = 0
+offset_left = 290.0
+offset_top = 720.0
+offset_right = 725.0
+offset_bottom = 780.0
+theme_override_font_sizes/font_size = 40
+text = "Клик: +1"
+
 [connection signal="pressed" from="Button" to="." method="_on_button_pressed"]
+[connection signal="pressed" from="ShopButton" to="." method="_on_shop_button_pressed"]
