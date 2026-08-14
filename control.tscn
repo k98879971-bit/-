@@ -30,11 +30,14 @@ theme_override_font_sizes/font_size = 150
 text = "Coins"
 
 [node name="ShopButton" type="Button" parent="." unique_id=27179283]
-layout_mode = 0
-offset_left = 525.0
-offset_top = 540.0
-offset_right = 839.0
-offset_bottom = 630.0
+layout_mode = 1
+anchors_preset = 0
+anchor_left = 0.6
+anchor_top = 0.8
+anchor_right = 0.95
+anchor_bottom = 0.94
+grow_horizontal = 2
+grow_vertical = 2
 theme_override_font_sizes/font_size = 40
 text = "x2 клик — 50"
 
