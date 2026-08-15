@@ -29,6 +29,42 @@ offset_bottom = 249.0
 theme_override_font_sizes/font_size = 150
 text = "Coins"
 
+[node name="RebirthButton" type="Button" parent="." unique_id=27179290]
+layout_mode = 1
+anchors_preset = 0
+anchor_left = 0.86
+anchor_top = 0.03
+anchor_right = 0.99
+anchor_bottom = 0.16
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/font_size = 24
+text = "Перерождение"
+
+[node name="WorldButton" type="Button" parent="." unique_id=27179291]
+layout_mode = 1
+anchors_preset = 0
+anchor_left = 0.01
+anchor_top = 0.03
+anchor_right = 0.15
+anchor_bottom = 0.16
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/font_size = 24
+text = "Мир 2 (1 млн)"
+
+[node name="AutoClickerButton" type="Button" parent="." unique_id=27179292]
+layout_mode = 1
+anchors_preset = 0
+anchor_left = 0.6
+anchor_top = 0.6
+anchor_right = 0.95
+anchor_bottom = 0.72
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/font_size = 30
+text = "Авто-клик — 50000"
+
 [node name="ShopButton" type="Button" parent="." unique_id=27179283]
 layout_mode = 1
 anchors_preset = 0
@@ -42,13 +78,23 @@ theme_override_font_sizes/font_size = 40
 text = "x2 клик — 50"
 
 [node name="MultiplierLabel" type="Label" parent="." unique_id=1131993714]
-layout_mode = 0
-offset_left = 290.0
-offset_top = 720.0
-offset_right = 725.0
-offset_bottom = 780.0
-theme_override_font_sizes/font_size = 40
+layout_mode = 1
+anchors_preset = 0
+anchor_left = 0.03
+anchor_top = 0.9
+anchor_right = 0.5
+anchor_bottom = 0.98
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/font_size = 36
 text = "Клик: +1"
+
+[node name="AutoTimer" type="Timer" parent="." unique_id=27179293]
+wait_time = 2.0
 
 [connection signal="pressed" from="Button" to="." method="_on_button_pressed"]
 [connection signal="pressed" from="ShopButton" to="." method="_on_shop_button_pressed"]
+[connection signal="pressed" from="AutoClickerButton" to="." method="_on_auto_button_pressed"]
+[connection signal="pressed" from="RebirthButton" to="." method="_on_rebirth_button_pressed"]
+[connection signal="pressed" from="WorldButton" to="." method="_on_world_button_pressed"]
+[connection signal="timeout" from="AutoTimer" to="." method="_on_auto_timer_timeout"]
