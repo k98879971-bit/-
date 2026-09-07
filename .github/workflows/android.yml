@@ -28,23 +28,18 @@ jobs:
           mkdir -p build/android
           godot --headless --export-debug "Android" build/android/MyGame-debug.apk
 
-      - name: Sign with debug keystore
+      - name: Sign with fixed debug keystore
         run: |
-          mkdir -p ~/.android
-          if [ ! -f ~/.android/debug.keystore ]; then
-            keytool -genkeypair -v -keystore ~/.android/debug.keystore \
-              -storepass android -alias androiddebugkey -keypass android \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
+          # Используем закоммиченный keystore — стабильная подпись,
+          # чтобы обновления ставились поверх старой версии без удаления.
           APKSigner=$(find $ANDROID_HOME/build-tools -name apksigner -type f | head -n1)
-          "$APKSigner" sign --ks ~/.android/debug.keystore --ks-pass pass:android \
+          "$APKSigner" sign --ks keystore/debug.keystore --ks-pass pass:android \
             --key-pass pass:android --ks-key-alias androiddebugkey \
             --out build/android/MyGame.apk build/android/MyGame-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MyGame-APK
+          name: Game2048-APK
           path: build/android/*.apk
 
       - name: Create GitHub Release
@@ -52,7 +47,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v0.1.0-build${{ github.run_number }}"
-          name: "MyGame v0.1.0 — Build ${{ github.run_number }}"
+          name: "2048 v0.1.0 — Build ${{ github.run_number }}"
           files: |
             build/android/MyGame.apk
             build/android/MyGame-debug.apk
